@@ -308,7 +308,6 @@ const TikTokViewBot = () => {
   const logEndRef = useRef<HTMLDivElement>(null);
   const fileInputLeftRef = useRef<HTMLInputElement>(null);
   const fileInputRightRef = useRef<HTMLInputElement>(null);
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   useEffect(() => {
     localStorage.setItem('proxies_left', proxiesLeft);
@@ -400,10 +399,14 @@ const TikTokViewBot = () => {
       const setStatus = side === 'A' ? setStatusA : setStatusB;
       const setRetries = side === 'A' ? setRetriesA : setRetriesB;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        if (signal.aborted) throw new Error('AbortError');
+        // Fix: Explicitly setting error name to AbortError for correct catch block identification
+        if (signal.aborted) {
+          const abortErr = new Error('AbortError');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
         try {
           setStatus(attempt === 0 ? 'syncing' : 'retrying');
-          setRetries(attempt);
           const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
           const response = await fetch(proxyUrl, { signal });
           if (!response.ok) throw new Error(`HTTP_${response.status} :: ${response.statusText}`);
@@ -411,7 +414,8 @@ const TikTokViewBot = () => {
           setStatus('success');
           return content;
         } catch (err: any) {
-          if (err.name === 'AbortError') throw err;
+          // Fix: Checking for AbortError properly
+          if (err.name === 'AbortError' || err.message === 'AbortError') throw err;
           
           let errorMsg = `Cluster ${side} attempt ${attempt + 1}/${maxRetries + 1} failed: `;
           if (err.message.includes("HTTP_")) {
@@ -435,11 +439,12 @@ const TikTokViewBot = () => {
       return null;
     };
     try {
-      const results = await Promise.allSettled([fetchWithRetry(urlA, 'A'), fetchWithRetry(urlB, 'B')]);
-      results.forEach((res, i) => {
+      // Fix: Use Promise.all instead of allSettled so AbortError can be caught by the outer block
+      const results = await Promise.all([fetchWithRetry(urlA, 'A'), fetchWithRetry(urlB, 'B')]);
+      results.forEach((content, i) => {
         const side = i === 0 ? 'A' : 'B';
-        if (res.status === 'fulfilled' && res.value) {
-          const allLines = res.value.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (content) {
+          const allLines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
           const validProxies = allLines.filter(l => PROXY_REGEX.test(l));
           
           if (i === 0) setProxiesLeft(validProxies.join('\n')); else setProxiesRight(validProxies.join('\n'));
@@ -452,8 +457,23 @@ const TikTokViewBot = () => {
         }
       });
     } catch (err: any) {
-      if (err.name !== 'AbortError') addLog(`Sync operation aborted unexpectedly: ${err.message}`, "error");
-    } finally { abortControllerRef.current = null; }
+      if (err.name === 'AbortError' || err.message === 'AbortError') {
+        addLog("Synchronization sequence manually terminated by operator.", "warning");
+        // Fix: Use functional state updates to avoid TypeScript narrowing errors in the closure
+        setStatusA(prev => (prev === 'syncing' || prev === 'retrying') ? 'idle' : prev);
+        setStatusB(prev => (prev === 'syncing' || prev === 'retrying') ? 'idle' : prev);
+      } else {
+        addLog(`Sync operation aborted unexpectedly: ${err.message}`, "error");
+      }
+    } finally { 
+      abortControllerRef.current = null; 
+    }
+  };
+
+  const handleCancelSync = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
   };
 
   const handleScrapeProxies = async () => {
@@ -461,6 +481,8 @@ const TikTokViewBot = () => {
     setIsScraping(true);
     addLog("Handshaking with global scraping engine...", "info");
     try {
+      // Fix: Create a new GoogleGenAI instance right before making an API call
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: `Scrape 80 high-quality public proxy nodes (IP:PORT). Realistic data. Format: one per line. No headers.`
@@ -497,6 +519,8 @@ const TikTokViewBot = () => {
     setViewHistory([{ time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), views: videoViews }]);
     addLog(`Initiating injection sequence for ${videoUrl}...`, 'info');
     try {
+      // Fix: Create a new GoogleGenAI instance right before making an API call
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: `Technical logs for TikTok view injection. URL: ${videoUrl}, Views: ${videoViews}. 8 lines. Professional syntax.`
@@ -607,6 +631,14 @@ const TikTokViewBot = () => {
                   <button onClick={handleSyncFromUrls} disabled={isSyncing} className="flex-1 py-2.5 bg-[#e91e63]/10 border border-[#e91e63]/20 text-[#e91e63] text-[10px] font-black rounded-lg hover:bg-[#e91e63] hover:text-white transition-all uppercase tracking-[0.2em] disabled:opacity-30">
                     {isSyncing ? 'SYNCING CLUSTERS...' : 'Synchronize Cluster'}
                   </button>
+                  {isSyncing && (
+                    <button 
+                      onClick={handleCancelSync} 
+                      className="px-4 py-2.5 bg-rose-500/10 border border-rose-500/40 text-rose-500 text-[10px] font-black rounded-lg hover:bg-rose-500 hover:text-white transition-all uppercase tracking-widest animate-in fade-in zoom-in"
+                    >
+                      Cancel Sync
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
